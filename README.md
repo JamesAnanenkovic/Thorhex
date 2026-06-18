@@ -1,2 +1,2 @@
-# Hexthor
+# Thorhex
 minimal hex editor
