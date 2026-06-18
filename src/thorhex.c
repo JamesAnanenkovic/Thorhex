@@ -12,6 +12,11 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define HEX_START 10
 #define ASCII_START 60
+
+enum { MENU_NONE = -1, MENU_OPEN, MENU_SAVE, MENU_SAVE_AS, MENU_QUIT, MENU_CLOSE, MENU_COUNT };
+static const char *menu_items[] = {
+    "Open File", "Save", "Save As", "Quit", "Close Menu"
+};
 #define COL_HEADER 1
 #define COL_CURSOR 2
 #define COL_STATUS 3
@@ -31,6 +36,7 @@ void enable_raw_mode(void) {
     raw();
     noecho();
     keypad(stdscr, TRUE);
+    set_escdelay(50);
     if (has_colors()) {
         start_color();
         use_default_colors();
@@ -77,32 +83,41 @@ void editor_init(Editor *e) {
     e->prev_offset = (size_t)-1;
     e->screen_rows = 24;
     e->screen_cols = 80;
+    e->menu_open = false;
+    e->menu_selection = 0;
 }
 
-void editor_open(Editor *e, const char *filename) {
+bool editor_open(Editor *e, const char *filename) {
     FILE *fp = fopen(filename, "rb");
     if (!fp)
-        die("fopen");
+        return false;
 
     fseek(fp, 0, SEEK_END);
     long file_size = ftell(fp);
-    if (file_size < 0)
-        die("ftell");
+    if (file_size < 0) { fclose(fp); return false; }
     rewind(fp);
 
-    e->filename = strdup(filename);
-    e->size = (size_t)file_size;
-    e->capacity = e->size + 1024;
-    e->data = malloc(e->capacity);
-    if (!e->data)
-        die("malloc");
+    char *fn = strdup(filename);
+    unsigned char *data = malloc((size_t)file_size + 1024);
+    if (!data) { free(fn); fclose(fp); return false; }
 
     if (file_size > 0) {
-        size_t n = fread(e->data, 1, e->size, fp);
-        if (n != e->size)
-            die("fread");
+        size_t n = fread(data, 1, (size_t)file_size, fp);
+        if (n != (size_t)file_size) { free(fn); free(data); fclose(fp); return false; }
     }
     fclose(fp);
+
+    e->filename = fn;
+    e->size = (size_t)file_size;
+    e->capacity = e->size + 1024;
+    e->data = data;
+    e->modified = false;
+    e->cursor = 0;
+    e->offset = 0;
+    e->pending = false;
+    e->prev_cursor = 0;
+    e->prev_offset = (size_t)-1;
+    return true;
 }
 
 bool editor_save(Editor *e) {
@@ -132,11 +147,6 @@ bool editor_save(Editor *e) {
     return true;
 }
 
-void editor_free(Editor *e) {
-    free(e->data);
-    free(e->filename);
-}
-
 void editor_set_status(Editor *e, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -156,6 +166,30 @@ static void editor_grow_data(Editor *e, size_t min_size) {
         die("realloc");
     e->data = new_data;
     e->capacity = new_cap;
+}
+
+void editor_save_as(Editor *e, const char *filename) {
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        editor_set_status(e, "Cannot open %s", filename);
+        return;
+    }
+    size_t n = fwrite(e->data, 1, e->size, fp);
+    if (n != e->size) {
+        fclose(fp);
+        editor_set_status(e, "Write failed");
+        return;
+    }
+    fclose(fp);
+    free(e->filename);
+    e->filename = strdup(filename);
+    e->modified = false;
+    editor_set_status(e, "Saved as %s (%zu bytes)", filename, e->size);
+}
+
+void editor_free(Editor *e) {
+    free(e->data);
+    free(e->filename);
 }
 
 void editor_move_cursor(Editor *e, int key) {
@@ -287,6 +321,82 @@ static void editor_draw_row(Editor *e, int r) {
     addch('|');
 }
 
+bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize) {
+    int len = 0;
+    buf[0] = '\0';
+    while (1) {
+        editor_refresh_screen(e);
+        attron(COLOR_PAIR(COL_HEADER) | A_BOLD);
+        mvhline(e->screen_rows - 1, 0, ' ', e->screen_cols);
+        mvprintw(e->screen_rows - 1, 1, "%s%s", prompt, buf);
+        move(e->screen_rows - 1, 1 + (int)strlen(prompt) + len);
+        attroff(COLOR_PAIR(COL_HEADER) | A_BOLD);
+        refresh();
+
+        int c = getch();
+        if (c == '\n' || c == '\r') {
+            break;
+        } else if (c == '\x1b') {
+            buf[0] = '\0';
+            return false;
+        } else if ((c == 127 || c == KEY_BACKSPACE || c == '\b') && len > 0) {
+            buf[--len] = '\0';
+        } else if (c >= 32 && c <= 126 && len < bufsize - 1) {
+            buf[len++] = c;
+            buf[len] = '\0';
+        } else if (c == KEY_ENTER) {
+            break;
+        }
+    }
+    e->prev_offset = (size_t)-1;
+    return buf[0] != '\0';
+}
+
+static void editor_draw_menu(Editor *e) {
+    int mw = 28;
+    int mh = MENU_COUNT + 4;
+    int mx = (e->screen_cols - mw) / 2;
+    int my = (e->screen_rows - mh) / 2;
+    if (mx < 0) mx = 0;
+    if (my < 0) my = 0;
+
+    // Background mask (simple — fill area)
+    for (int r = 0; r < mh; r++)
+        for (int c = 0; c < mw; c++)
+            mvaddch(my + r, mx + c, ' ');
+
+    // Border
+    mvaddch(my, mx, '+');
+    mvaddch(my, mx + mw - 1, '+');
+    mvaddch(my + mh - 1, mx, '+');
+    mvaddch(my + mh - 1, mx + mw - 1, '+');
+    for (int c = 1; c < mw - 1; c++) {
+        mvaddch(my, mx + c, '-');
+        mvaddch(my + mh - 1, mx + c, '-');
+    }
+    for (int r = 1; r < mh - 1; r++) {
+        mvaddch(my + r, mx, '|');
+        mvaddch(my + r, mx + mw - 1, '|');
+    }
+
+    // Title
+    attron(A_BOLD);
+    mvprintw(my + 1, mx + (mw - 11) / 2, " THORHEX ");
+    attroff(A_BOLD);
+
+    // Items
+    for (int i = 0; i < MENU_COUNT; i++) {
+        int row = my + 3 + i;
+        if (i == e->menu_selection) {
+            attron(COLOR_PAIR(COL_CURSOR));
+            mvprintw(row, mx + 2, "%s", menu_items[i]);
+            attroff(COLOR_PAIR(COL_CURSOR));
+        } else {
+            mvprintw(row, mx + 2, "%s", menu_items[i]);
+        }
+    }
+}
+
 void editor_refresh_screen(Editor *e) {
     editor_scroll(e);
     getmaxyx(stdscr, e->screen_rows, e->screen_cols);
@@ -384,6 +494,10 @@ void editor_refresh_screen(Editor *e) {
     if (sc >= e->screen_cols - 1) sc = e->screen_cols - 2;
 
     move(sr, sc);
+
+    if (e->menu_open)
+        editor_draw_menu(e);
+
     refresh();
 
     e->prev_cursor = e->cursor;
@@ -432,6 +546,46 @@ static void editor_handle_ascii_input(Editor *e, int key) {
         e->cursor++;
 }
 
+static void editor_menu_action(Editor *e, int action) {
+    e->menu_open = false;
+    e->prev_offset = (size_t)-1;
+
+    switch (action) {
+        case MENU_OPEN: {
+            char path[1024] = {0};
+            if (editor_prompt(e, "Open: ", path, sizeof(path))) {
+                editor_free(e);
+                editor_init(e);
+                if (!editor_open(e, path))
+                    editor_set_status(e, "Cannot open %s", path);
+            }
+            break;
+        }
+        case MENU_SAVE:
+            if (editor_save(e))
+                editor_set_status(e, "Saved (%zu bytes)", e->size);
+            else
+                editor_set_status(e, "Save failed!");
+            break;
+        case MENU_SAVE_AS: {
+            char path[1024] = {0};
+            if (editor_prompt(e, "Save As: ", path, sizeof(path)))
+                editor_save_as(e, path);
+            break;
+        }
+        case MENU_QUIT:
+            if (e->modified) {
+                e->quit_confirm = true;
+                editor_set_status(e, "Save changes? (y/n/c)");
+            } else {
+                e->running = false;
+            }
+            break;
+        case MENU_CLOSE:
+            break;
+    }
+}
+
 void editor_process_key(Editor *e, int key) {
     e->status_msg[0] = '\0';
 
@@ -447,6 +601,29 @@ void editor_process_key(Editor *e, int key) {
             editor_set_status(e, "Quit cancelled");
         }
         e->quit_confirm = false;
+        return;
+    }
+
+    if (e->menu_open) {
+        switch (key) {
+            case ARROW_UP:
+                if (e->menu_selection > 0)
+                    e->menu_selection--;
+                break;
+            case ARROW_DOWN:
+                if (e->menu_selection < MENU_COUNT - 1)
+                    e->menu_selection++;
+                break;
+            case '\n':
+            case '\r':
+            case KEY_ENTER:
+                editor_menu_action(e, e->menu_selection);
+                break;
+            case '\x1b':
+                e->menu_open = false;
+                e->prev_offset = (size_t)-1;
+                break;
+        }
         return;
     }
 
@@ -483,7 +660,8 @@ void editor_process_key(Editor *e, int key) {
             break;
 
         case '\x1b':
-            e->pending = false;
+            e->menu_open = true;
+            e->menu_selection = 0;
             break;
 
         case ARROW_UP:

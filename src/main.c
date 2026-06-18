@@ -10,7 +10,10 @@ int main(int argc, char *argv[]) {
 
     Editor editor;
     editor_init(&editor);
-    editor_open(&editor, argv[1]);
+    if (!editor_open(&editor, argv[1])) {
+        fprintf(stderr, "thorhex: cannot open %s\n", argv[1]);
+        return 1;
+    }
     enable_raw_mode();
 
     while (editor.running) {

@@ -41,11 +41,14 @@ typedef struct {
     bool quit_confirm;
     size_t prev_cursor;
     size_t prev_offset;
+    bool menu_open;
+    int menu_selection;
 } Editor;
 
 void editor_init(Editor *e);
-void editor_open(Editor *e, const char *filename);
+bool editor_open(Editor *e, const char *filename);
 bool editor_save(Editor *e);
+void editor_save_as(Editor *e, const char *filename);
 void editor_free(Editor *e);
 void editor_move_cursor(Editor *e, int key);
 void editor_process_key(Editor *e, int key);
@@ -54,5 +57,6 @@ void editor_refresh_screen(Editor *e);
 void enable_raw_mode(void);
 void disable_raw_mode(void);
 void die(const char *s);
+bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize);
 
 #endif
