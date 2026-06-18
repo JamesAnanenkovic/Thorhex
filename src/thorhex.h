@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <time.h>
+#include <ncurses.h>
 
 #define THORHEX_VERSION "0.1.0"
-#define TAB_STOP 8
 #define BYTES_PER_ROW 16
 
 enum editor_key {

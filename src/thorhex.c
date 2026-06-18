@@ -3,105 +3,59 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <poll.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <termios.h>
 #include <unistd.h>
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define HEX_START 10
 #define ASCII_START 60
-
-static struct termios orig_termios;
+#define COL_HEADER 1
+#define COL_CURSOR 2
+#define COL_STATUS 3
 
 void die(const char *s) {
-    disable_raw_mode();
+    endwin();
     perror(s);
     exit(1);
 }
 
 void disable_raw_mode(void) {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+    endwin();
 }
 
 void enable_raw_mode(void) {
-    if (tcgetattr(STDIN_FILENO, &orig_termios) == -1)
-        die("tcgetattr");
+    initscr();
+    raw();
+    noecho();
+    keypad(stdscr, TRUE);
+    if (has_colors()) {
+        start_color();
+        use_default_colors();
+        init_pair(COL_HEADER, COLOR_WHITE, COLOR_BLUE);
+        init_pair(COL_CURSOR, COLOR_BLACK, COLOR_WHITE);
+        init_pair(COL_STATUS, COLOR_WHITE, COLOR_BLUE);
+    }
     atexit(disable_raw_mode);
-
-    struct termios raw = orig_termios;
-    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    raw.c_oflag &= ~(OPOST);
-    raw.c_cflag |= (CS8);
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
-
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
-        die("tcsetattr");
-}
-
-static int get_screen_size(int *rows, int *cols) {
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
-        return -1;
-    *cols = ws.ws_col;
-    *rows = ws.ws_row;
-    return 0;
 }
 
 int editor_read_key(void) {
-    int nread;
-    char c;
-    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
-        if (nread == -1 && errno != EAGAIN)
-            die("read");
+    int ch = getch();
+    switch (ch) {
+        case KEY_UP:    return ARROW_UP;
+        case KEY_DOWN:  return ARROW_DOWN;
+        case KEY_LEFT:  return ARROW_LEFT;
+        case KEY_RIGHT: return ARROW_RIGHT;
+        case KEY_PPAGE: return PAGE_UP;
+        case KEY_NPAGE: return PAGE_DOWN;
+        case KEY_HOME:  return HOME_KEY;
+        case KEY_END:   return END_KEY;
+        case KEY_BACKSPACE: return BACKSPACE;
+        case KEY_DC:    return DEL_KEY;
+        default:        return ch;
     }
-
-    if (c == '\x1b') {
-        char seq[3];
-        if (read(STDIN_FILENO, &seq[0], 1) != 1)
-            return '\x1b';
-        if (read(STDIN_FILENO, &seq[1], 1) != 1)
-            return '\x1b';
-
-        if (seq[0] == '[') {
-            if (seq[1] >= '0' && seq[1] <= '9') {
-                if (read(STDIN_FILENO, &seq[2], 1) != 1)
-                    return '\x1b';
-                if (seq[2] == '~') {
-                    switch (seq[1]) {
-                        case '5': return PAGE_UP;
-                        case '6': return PAGE_DOWN;
-                        case '3': return DEL_KEY;
-                        case '1': return HOME_KEY;
-                        case '4': return END_KEY;
-                    }
-                }
-            } else {
-                switch (seq[1]) {
-                    case 'A': return ARROW_UP;
-                    case 'B': return ARROW_DOWN;
-                    case 'C': return ARROW_RIGHT;
-                    case 'D': return ARROW_LEFT;
-                    case 'H': return HOME_KEY;
-                    case 'F': return END_KEY;
-                }
-            }
-        } else if (seq[0] == 'O') {
-            switch (seq[1]) {
-                case 'H': return HOME_KEY;
-                case 'F': return END_KEY;
-            }
-        }
-        return '\x1b';
-    }
-    return c;
 }
 
 void editor_init(Editor *e) {
@@ -121,11 +75,8 @@ void editor_init(Editor *e) {
     e->quit_confirm = false;
     e->prev_cursor = 0;
     e->prev_offset = (size_t)-1;
-
-    if (get_screen_size(&e->screen_rows, &e->screen_cols) == -1) {
-        e->screen_rows = 24;
-        e->screen_cols = 80;
-    }
+    e->screen_rows = 24;
+    e->screen_cols = 80;
 }
 
 void editor_open(Editor *e, const char *filename) {
@@ -252,7 +203,7 @@ void editor_move_cursor(Editor *e, int key) {
     }
 
     if (cursor != e->cursor) {
-        e->pending = false; // Discard pending nibble on move
+        e->pending = false;
         e->cursor = cursor;
     }
 }
@@ -273,188 +224,153 @@ static void editor_scroll(Editor *e) {
     e->offset = offset_row * BYTES_PER_ROW;
 }
 
-static void editor_draw_row(Editor *e, char *buf, size_t bufsz, size_t row_offset) {
-    char *p = buf;
-    char *end = buf + bufsz - 1;
+static void editor_draw_row(Editor *e, int r) {
+    size_t ro = e->offset + (size_t)r * BYTES_PER_ROW;
+    int y = 1 + r;
 
-    // Offset
-    p += snprintf(p, end - p + 1, "%08zX  ", row_offset);
+    move(y, 0);
+    addch('|');
+    addch(' ');
 
-    // Hex bytes
+    printw("%08zX  ", ro);
+
     for (int i = 0; i < BYTES_PER_ROW; i++) {
-        if (p >= end) break;
-        if (row_offset + i < e->size) {
-            unsigned char byte = e->data[row_offset + i];
-            if (row_offset + i == e->cursor && e->hex_mode && e->pending) {
-                // Show pending nibble highlighted: only first digit has the
-                // entered nibble, second digit is '_'
-                int digit = (e->nibble >> 4) & 0xf;
-                p += snprintf(p, end - p + 1, "\x1b[7m%X\x1b[m_", digit);
-            } else if (row_offset + i == e->cursor && e->hex_mode) {
-                p += snprintf(p, end - p + 1, "\x1b[7m%02X\x1b[m", byte);
+        if (ro + i < e->size) {
+            unsigned char byte = e->data[ro + i];
+            if (ro + i == e->cursor && e->hex_mode) {
+                if (e->pending) {
+                    int digit = (e->nibble >> 4) & 0xf;
+                    attron(COLOR_PAIR(COL_CURSOR));
+                    printw("%X", digit);
+                    attroff(COLOR_PAIR(COL_CURSOR));
+                    addch('_');
+                } else {
+                    attron(COLOR_PAIR(COL_CURSOR));
+                    printw("%02X", byte);
+                    attroff(COLOR_PAIR(COL_CURSOR));
+                }
             } else {
-                p += snprintf(p, end - p + 1, "%02X", byte);
+                printw("%02X", byte);
             }
         } else {
-            p += snprintf(p, end - p + 1, "  ");
+            printw("  ");
         }
 
         if (i == 7)
-            p += snprintf(p, end - p + 1, "  ");
+            printw("  ");
         else if (i < BYTES_PER_ROW - 1)
-            *p++ = ' ';
+            addch(' ');
     }
 
-    // Separator
-    p += snprintf(p, end - p + 1, "  ");
-
-    // ASCII
+    printw("  ");
     for (int i = 0; i < BYTES_PER_ROW; i++) {
-        if (p >= end) break;
-        if (row_offset + i < e->size) {
-            unsigned char byte = e->data[row_offset + i];
+        if (ro + i < e->size) {
+            unsigned char byte = e->data[ro + i];
             char c = (byte >= 32 && byte < 127) ? (char)byte : '.';
-            if (row_offset + i == e->cursor && !e->hex_mode)
-                p += snprintf(p, end - p + 1, "\x1b[7m%c\x1b[m", c);
-            else
-                *p++ = c;
-        } else {
-            *p++ = ' ';
-        }
-    }
-
-    // Clear to end of line
-    p += snprintf(p, end - p + 1, "\x1b[K");
-    *p = '\0';
-}
-
-static void editor_draw_status_bar(Editor *e, char *buf, size_t bufsz) {
-    char *p = buf;
-    char *end = buf + bufsz - 1;
-
-    // Mode indicator
-    const char *mode = e->hex_mode ? "HEX" : "ASC";
-    const char *mod = e->modified ? " MODIFIED" : "";
-
-    size_t pos = e->cursor;
-    size_t total = e->size > 0 ? e->size : 0;
-    size_t pct = total > 0 ? (pos * 100) / total : 0;
-
-    int n = snprintf(p, end - p + 1, "\x1b[7m %s%s | %08zX/%08zX (%zu%%) ",
-                     mode, mod, pos, total, pct);
-    if (n > 0) p += n;
-
-    // Right-aligned status message
-    if (e->status_msg[0] && difftime(time(NULL), e->status_time) < 3) {
-        int msg_len = strlen(e->status_msg);
-        int right_col = e->screen_cols - msg_len - 1;
-        if (right_col > n) {
-            // Pad to right column
-            int padding = right_col - (p - buf);
-            if (padding > 0) {
-                memset(p, ' ', padding);
-                p += padding;
+            if (ro + i == e->cursor && !e->hex_mode) {
+                attron(COLOR_PAIR(COL_CURSOR));
+                addch(c);
+                attroff(COLOR_PAIR(COL_CURSOR));
+            } else {
+                addch(c);
             }
-            p += snprintf(p, end - p + 1, "%s ", e->status_msg);
+        } else {
+            addch(' ');
         }
     }
 
-    // Pad rest
-    while (p < end && (p - buf) < e->screen_cols - 1) {
-        *p++ = ' ';
+    int cx = getcurx(stdscr);
+    while (cx < e->screen_cols - 1) {
+        addch(' ');
+        cx++;
     }
-    p += snprintf(p, end - p + 1, "\x1b[m\x1b[K");
-    *p = '\0';
-}
-
-static void editor_write_esc(char **p, char *end, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(*p, end - *p + 1, fmt, ap);
-    va_end(ap);
-    if (n > 0) *p += n;
+    addch('|');
 }
 
 void editor_refresh_screen(Editor *e) {
     editor_scroll(e);
+    getmaxyx(stdscr, e->screen_rows, e->screen_cols);
 
-    int rows = e->screen_rows - 3;
-    if (rows <= 0) rows = 1;
-    int status_line = rows + 2;
+    int content_rows = e->screen_rows - 3;
+    if (content_rows <= 0) content_rows = 1;
 
     bool first = (e->prev_offset == (size_t)-1);
     bool scrolled = (!first && e->offset != e->prev_offset);
 
-    char buf[4096];
-    char *p = buf;
-    char *end = buf + sizeof(buf) - 2;
+    if (first || scrolled) {
+        clear();
 
-    editor_write_esc(&p, end, "\x1b[?25l");
+        // Header / top border:  +-- THORHEX ... --+
+        attron(COLOR_PAIR(COL_HEADER) | A_BOLD);
+        move(0, 0);
+        addch('+');
+        printw("-- THORHEX ");
+        if (e->filename)
+            printw("%s (%zu bytes%c) ", e->filename, e->size, e->modified ? '*' : ' ');
+        else
+            printw("[No File] ");
+        while (getcurx(stdscr) < e->screen_cols - 1)
+            addch('-');
+        addch('+');
+        attroff(COLOR_PAIR(COL_HEADER) | A_BOLD);
 
-    if (first) {
-        editor_write_esc(&p, end, "\x1b[2J\x1b[H");
-        editor_write_esc(&p, end, "\x1b[7m THORHEX  %s (%zu bytes)%c \x1b[m\x1b[K\r\n",
-                         e->filename ? e->filename : "[No File]",
-                         e->size, e->modified ? '*' : ' ');
-        for (int r = 0; r < rows; r++) {
-            size_t ro = e->offset + (size_t)r * BYTES_PER_ROW;
-            if (ro <= e->size) {
-                char rb[512];
-                editor_draw_row(e, rb, sizeof(rb), ro);
-                editor_write_esc(&p, end, "%s", rb);
+        // Content rows
+        for (int r = 0; r < content_rows; r++)
+            editor_draw_row(e, r);
+
+        // Bottom border + status:  +-- HEX | ... --+
+        attron(COLOR_PAIR(COL_STATUS));
+        int status_row = content_rows + 1;
+        move(status_row, 0);
+        addch('+');
+        printw("-- ");
+
+        const char *mode = e->hex_mode ? "HEX" : "ASC";
+        size_t pct = e->size > 0 ? (e->cursor * 100) / e->size : 0;
+        printw("%s | %08zX/%08zX (%zu%%)  ", mode, e->cursor, e->size, pct);
+
+        // Right-aligned status message
+        if (e->status_msg[0] && difftime(time(NULL), e->status_time) < 3) {
+            int msg_x = e->screen_cols - (int)strlen(e->status_msg) - 4;
+            if (msg_x > getcurx(stdscr)) {
+                move(status_row, msg_x);
+                printw(" %s ", e->status_msg);
             }
-            editor_write_esc(&p, end, "\r\n");
         }
-    } else if (scrolled) {
-        editor_write_esc(&p, end, "\x1b[H");
-        editor_write_esc(&p, end, "\x1b[7m THORHEX  %s (%zu bytes)%c \x1b[m\x1b[K\r\n",
-                         e->filename ? e->filename : "[No File]",
-                         e->size, e->modified ? '*' : ' ');
-        for (int r = 0; r < rows; r++) {
-            size_t ro = e->offset + (size_t)r * BYTES_PER_ROW;
-            if (ro <= e->size) {
-                char rb[512];
-                editor_draw_row(e, rb, sizeof(rb), ro);
-                editor_write_esc(&p, end, "%s", rb);
-            }
-            editor_write_esc(&p, end, "\r\n");
-        }
+
+        move(status_row, getcurx(stdscr) < e->screen_cols - 1 ? getcurx(stdscr) : e->screen_cols - 2);
+        while (getcurx(stdscr) < e->screen_cols - 1)
+            addch('-');
+        addch('+');
+        attroff(COLOR_PAIR(COL_STATUS));
     } else {
         int old_r = (int)((e->prev_cursor - e->offset) / BYTES_PER_ROW);
         int new_r = (int)((e->cursor - e->offset) / BYTES_PER_ROW);
 
-        if (old_r >= 0 && old_r < rows && old_r != new_r) {
-            size_t ro = e->offset + (size_t)old_r * BYTES_PER_ROW;
-            editor_write_esc(&p, end, "\x1b[%dH", old_r + 2);
-            if (ro <= e->size) {
-                char rb[512];
-                editor_draw_row(e, rb, sizeof(rb), ro);
-                editor_write_esc(&p, end, "%s", rb);
-            }
-            editor_write_esc(&p, end, "\x1b[K\r\n");
-        }
-        if (new_r >= 0 && new_r < rows) {
-            size_t ro = e->offset + (size_t)new_r * BYTES_PER_ROW;
-            editor_write_esc(&p, end, "\x1b[%dH", new_r + 2);
-            if (ro <= e->size) {
-                char rb[512];
-                editor_draw_row(e, rb, sizeof(rb), ro);
-                editor_write_esc(&p, end, "%s", rb);
-            }
-            editor_write_esc(&p, end, "\x1b[K\r\n");
-        }
+        if (old_r >= 0 && old_r < content_rows && old_r != new_r)
+            editor_draw_row(e, old_r);
+        if (new_r >= 0 && new_r < content_rows)
+            editor_draw_row(e, new_r);
+
+        // Update status bar (position info changed)
+        int status_row = content_rows + 1;
+        const char *mode = e->hex_mode ? "HEX" : "ASC";
+        size_t pct = e->size > 0 ? (e->cursor * 100) / e->size : 0;
+        attron(COLOR_PAIR(COL_STATUS));
+        move(status_row, 4);
+        printw("%s | %08zX/%08zX (%zu%%)  ", mode, e->cursor, e->size, pct);
+        // Clear to right border (before the '+')
+        int fill_start = getcurx(stdscr);
+        move(status_row, fill_start);
+        while (getcurx(stdscr) < e->screen_cols - 1)
+            addch('-');
+        attroff(COLOR_PAIR(COL_STATUS));
     }
 
-    // Status bar
-    editor_write_esc(&p, end, "\x1b[%dH", status_line);
-    char sb[256];
-    editor_draw_status_bar(e, sb, sizeof(sb));
-    editor_write_esc(&p, end, "%s", sb);
-
-    // Cursor
+    // Position cursor
     size_t cr = (e->cursor - e->offset) / BYTES_PER_ROW;
     size_t cc = (e->cursor - e->offset) % BYTES_PER_ROW;
-    int sr = (int)cr + 2;
+    int sr = (int)cr + 1;
     int sc;
     if (e->hex_mode) {
         sc = HEX_START + (int)cc * 3;
@@ -463,12 +379,12 @@ void editor_refresh_screen(Editor *e) {
     } else {
         sc = ASCII_START + (int)cc;
     }
-    if (sr > e->screen_rows - 2) sr = e->screen_rows - 2;
-    if (sc > e->screen_cols) sc = e->screen_cols;
-    editor_write_esc(&p, end, "\x1b[%d;%dH\x1b[?25h", sr, sc);
+    sc += 2; // left border '|' + space after it
+    if (sr > content_rows) sr = content_rows;
+    if (sc >= e->screen_cols - 1) sc = e->screen_cols - 2;
 
-    *p = '\0';
-    write(STDOUT_FILENO, buf, p - buf);
+    move(sr, sc);
+    refresh();
 
     e->prev_cursor = e->cursor;
     e->prev_offset = e->offset;
@@ -489,7 +405,6 @@ static void editor_handle_hex_input(Editor *e, int key) {
     }
 
     if (e->pending) {
-        // Combine with pending nibble
         unsigned char byte = e->nibble | (unsigned char)digit;
         editor_grow_data(e, e->cursor + 1);
         if (e->cursor >= e->size)
@@ -497,7 +412,6 @@ static void editor_handle_hex_input(Editor *e, int key) {
         e->data[e->cursor] = byte;
         e->modified = true;
         e->pending = false;
-        // Move to next byte
         if (e->cursor < e->size)
             e->cursor++;
     } else {

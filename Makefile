@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -std=c11 -O2
-LDFLAGS =
+LDFLAGS = -lncurses
 SRC = src/main.c src/thorhex.c
 OBJ = $(SRC:.c=.o)
 TARGET = thorhex
