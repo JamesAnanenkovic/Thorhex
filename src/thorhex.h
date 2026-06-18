@@ -1,0 +1,56 @@
+#ifndef THORHEX_H
+#define THORHEX_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <time.h>
+
+#define THORHEX_VERSION "0.1.0"
+#define TAB_STOP 8
+#define BYTES_PER_ROW 16
+
+enum editor_key {
+    BACKSPACE = 127,
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN,
+    PAGE_UP,
+    PAGE_DOWN,
+    HOME_KEY,
+    END_KEY,
+    DEL_KEY,
+};
+
+typedef struct {
+    unsigned char *data;
+    size_t size;
+    size_t capacity;
+    char *filename;
+    bool modified;
+    size_t cursor;
+    size_t offset;
+    bool hex_mode;
+    bool pending;
+    unsigned char nibble;
+    int screen_rows;
+    int screen_cols;
+    char status_msg[80];
+    time_t status_time;
+    bool running;
+    bool quit_confirm;
+} Editor;
+
+void editor_init(Editor *e);
+void editor_open(Editor *e, const char *filename);
+bool editor_save(Editor *e);
+void editor_free(Editor *e);
+void editor_move_cursor(Editor *e, int key);
+void editor_process_key(Editor *e, int key);
+int editor_read_key(void);
+void editor_refresh_screen(Editor *e);
+void enable_raw_mode(void);
+void disable_raw_mode(void);
+void die(const char *s);
+
+#endif
