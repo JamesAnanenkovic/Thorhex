@@ -39,6 +39,8 @@ typedef struct {
     time_t status_time;
     bool running;
     bool quit_confirm;
+    size_t prev_cursor;
+    size_t prev_offset;
 } Editor;
 
 void editor_init(Editor *e);

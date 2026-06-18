@@ -119,6 +119,8 @@ void editor_init(Editor *e) {
     e->status_time = 0;
     e->running = true;
     e->quit_confirm = false;
+    e->prev_cursor = 0;
+    e->prev_offset = (size_t)-1;
 
     if (get_screen_size(&e->screen_rows, &e->screen_cols) == -1) {
         e->screen_rows = 24;
@@ -365,72 +367,111 @@ static void editor_draw_status_bar(Editor *e, char *buf, size_t bufsz) {
     *p = '\0';
 }
 
+static void editor_write_esc(char **p, char *end, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(*p, end - *p + 1, fmt, ap);
+    va_end(ap);
+    if (n > 0) *p += n;
+}
+
 void editor_refresh_screen(Editor *e) {
     editor_scroll(e);
 
-    char buf[4096];
-    char *p = buf;
-    char *end = buf + sizeof(buf) - 1;
-
-    // Hide cursor
-    p += snprintf(p, end - p + 1, "\x1b[?25l");
-
-    // Clear screen and go home
-    p += snprintf(p, end - p + 1, "\x1b[2J\x1b[H");
-
-    // Header
-    if (e->filename)
-        p += snprintf(p, end - p + 1, "\x1b[7m THORHEX  %s (%zu bytes)%c \x1b[m\x1b[K\r\n",
-                      e->filename, e->size, e->modified ? '*' : ' ');
-    else
-        p += snprintf(p, end - p + 1, "\x1b[7m THORHEX  [No File] \x1b[m\x1b[K\r\n");
-
-    // Content
     int rows = e->screen_rows - 3;
     if (rows <= 0) rows = 1;
+    int status_line = rows + 2;
 
-    for (int r = 0; r < rows; r++) {
-        size_t row_offset = e->offset + (size_t)r * BYTES_PER_ROW;
-        if (row_offset <= e->size) {
-            char row_buf[512];
-            editor_draw_row(e, row_buf, sizeof(row_buf), row_offset);
-            p += snprintf(p, end - p + 1, "%s", row_buf);
+    bool first = (e->prev_offset == (size_t)-1);
+    bool scrolled = (!first && e->offset != e->prev_offset);
+
+    char buf[4096];
+    char *p = buf;
+    char *end = buf + sizeof(buf) - 2;
+
+    editor_write_esc(&p, end, "\x1b[?25l");
+
+    if (first) {
+        editor_write_esc(&p, end, "\x1b[2J\x1b[H");
+        editor_write_esc(&p, end, "\x1b[7m THORHEX  %s (%zu bytes)%c \x1b[m\x1b[K\r\n",
+                         e->filename ? e->filename : "[No File]",
+                         e->size, e->modified ? '*' : ' ');
+        for (int r = 0; r < rows; r++) {
+            size_t ro = e->offset + (size_t)r * BYTES_PER_ROW;
+            if (ro <= e->size) {
+                char rb[512];
+                editor_draw_row(e, rb, sizeof(rb), ro);
+                editor_write_esc(&p, end, "%s", rb);
+            }
+            editor_write_esc(&p, end, "\r\n");
         }
-        p += snprintf(p, end - p + 1, "\r\n");
+    } else if (scrolled) {
+        editor_write_esc(&p, end, "\x1b[H");
+        editor_write_esc(&p, end, "\x1b[7m THORHEX  %s (%zu bytes)%c \x1b[m\x1b[K\r\n",
+                         e->filename ? e->filename : "[No File]",
+                         e->size, e->modified ? '*' : ' ');
+        for (int r = 0; r < rows; r++) {
+            size_t ro = e->offset + (size_t)r * BYTES_PER_ROW;
+            if (ro <= e->size) {
+                char rb[512];
+                editor_draw_row(e, rb, sizeof(rb), ro);
+                editor_write_esc(&p, end, "%s", rb);
+            }
+            editor_write_esc(&p, end, "\r\n");
+        }
+    } else {
+        int old_r = (int)((e->prev_cursor - e->offset) / BYTES_PER_ROW);
+        int new_r = (int)((e->cursor - e->offset) / BYTES_PER_ROW);
+
+        if (old_r >= 0 && old_r < rows && old_r != new_r) {
+            size_t ro = e->offset + (size_t)old_r * BYTES_PER_ROW;
+            editor_write_esc(&p, end, "\x1b[%dH", old_r + 2);
+            if (ro <= e->size) {
+                char rb[512];
+                editor_draw_row(e, rb, sizeof(rb), ro);
+                editor_write_esc(&p, end, "%s", rb);
+            }
+            editor_write_esc(&p, end, "\x1b[K\r\n");
+        }
+        if (new_r >= 0 && new_r < rows) {
+            size_t ro = e->offset + (size_t)new_r * BYTES_PER_ROW;
+            editor_write_esc(&p, end, "\x1b[%dH", new_r + 2);
+            if (ro <= e->size) {
+                char rb[512];
+                editor_draw_row(e, rb, sizeof(rb), ro);
+                editor_write_esc(&p, end, "%s", rb);
+            }
+            editor_write_esc(&p, end, "\x1b[K\r\n");
+        }
     }
 
     // Status bar
-    char status_buf[256];
-    editor_draw_status_bar(e, status_buf, sizeof(status_buf));
-    p += snprintf(p, end - p + 1, "%s", status_buf);
+    editor_write_esc(&p, end, "\x1b[%dH", status_line);
+    char sb[256];
+    editor_draw_status_bar(e, sb, sizeof(sb));
+    editor_write_esc(&p, end, "%s", sb);
 
-    // Position cursor
-    size_t cursor_row = (e->cursor - e->offset) / BYTES_PER_ROW;
-    size_t cursor_col = (e->cursor - e->offset) % BYTES_PER_ROW;
-
-    int screen_row = (int)cursor_row + 2; // +1 for header, +1 for 1-indexed
-    int screen_col;
+    // Cursor
+    size_t cr = (e->cursor - e->offset) / BYTES_PER_ROW;
+    size_t cc = (e->cursor - e->offset) % BYTES_PER_ROW;
+    int sr = (int)cr + 2;
+    int sc;
     if (e->hex_mode) {
-        screen_col = HEX_START + (int)cursor_col * 3;
-        if (cursor_col >= 8) screen_col++;
-        if (e->pending)
-            screen_col++; // Show cursor on second digit position
+        sc = HEX_START + (int)cc * 3;
+        if (cc >= 8) sc++;
+        if (e->pending) sc++;
     } else {
-        screen_col = ASCII_START + (int)cursor_col;
+        sc = ASCII_START + (int)cc;
     }
-
-    if (screen_row > e->screen_rows - 2)
-        screen_row = e->screen_rows - 2;
-    if (screen_col > e->screen_cols)
-        screen_col = e->screen_cols;
-
-    p += snprintf(p, end - p + 1, "\x1b[%d;%dH", screen_row, screen_col);
-
-    // Show cursor
-    p += snprintf(p, end - p + 1, "\x1b[?25h");
+    if (sr > e->screen_rows - 2) sr = e->screen_rows - 2;
+    if (sc > e->screen_cols) sc = e->screen_cols;
+    editor_write_esc(&p, end, "\x1b[%d;%dH\x1b[?25h", sr, sc);
 
     *p = '\0';
     write(STDOUT_FILENO, buf, p - buf);
+
+    e->prev_cursor = e->cursor;
+    e->prev_offset = e->offset;
 }
 
 static void editor_handle_hex_input(Editor *e, int key) {
