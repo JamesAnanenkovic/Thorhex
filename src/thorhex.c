@@ -14,6 +14,10 @@
 #define ASCII_START 60
 
 enum { MENU_NONE = -1, MENU_OPEN, MENU_SAVE, MENU_SAVE_AS, MENU_QUIT, MENU_CLOSE, MENU_COUNT };
+enum { WELCOME_OPEN, WELCOME_NEW, WELCOME_QUIT, WELCOME_COUNT };
+static const char *welcome_items[] = {
+    "Open File", "Create New File", "Quit"
+};
 static const char *menu_items[] = {
     "Open File", "Save", "Save As", "Quit", "Close Menu"
 };
@@ -85,6 +89,8 @@ void editor_init(Editor *e) {
     e->screen_cols = 80;
     e->menu_open = false;
     e->menu_selection = 0;
+    e->welcome_selection = 0;
+    e->editor_active = false;
 }
 
 bool editor_open(Editor *e, const char *filename) {
@@ -114,6 +120,7 @@ bool editor_open(Editor *e, const char *filename) {
     e->modified = false;
     e->cursor = 0;
     e->offset = 0;
+    e->editor_active = true;
     e->pending = false;
     e->prev_cursor = 0;
     e->prev_offset = (size_t)-1;
@@ -352,6 +359,52 @@ bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize) {
     return buf[0] != '\0';
 }
 
+static void editor_draw_welcome(Editor *e) {
+    clear();
+    int cw = 34, ch = 12;
+    int cx = (e->screen_cols - cw) / 2;
+    int cy = (e->screen_rows - ch) / 2;
+    if (cx < 0) cx = 0;
+    if (cy < 0) cy = 0;
+
+    for (int r = 0; r < ch; r++)
+        for (int c = 0; c < cw; c++)
+            mvaddch(cy + r, cx + c, ' ');
+
+    mvaddch(cy, cx, '+');
+    mvaddch(cy, cx + cw - 1, '+');
+    mvaddch(cy + ch - 1, cx, '+');
+    mvaddch(cy + ch - 1, cx + cw - 1, '+');
+    for (int c = 1; c < cw - 1; c++) {
+        mvaddch(cy, cx + c, '-');
+        mvaddch(cy + ch - 1, cx + c, '-');
+    }
+    for (int r = 1; r < ch - 1; r++) {
+        mvaddch(cy + r, cx, '|');
+        mvaddch(cy + r, cx + cw - 1, '|');
+    }
+
+    attron(A_BOLD);
+    mvprintw(cy + 1, cx + (cw - 10) / 2, " THORHEX ");
+    attroff(A_BOLD);
+    mvprintw(cy + 2, cx + (cw - 9) / 2, "v%s  Hex Editor", THORHEX_VERSION);
+
+    for (int i = 0; i < WELCOME_COUNT; i++) {
+        int row = cy + 5 + i * 2;
+        if (i == e->welcome_selection) {
+            attron(COLOR_PAIR(COL_CURSOR));
+            mvprintw(row, cx + (cw - (int)strlen(welcome_items[i])) / 2, "%s", welcome_items[i]);
+            attroff(COLOR_PAIR(COL_CURSOR));
+        } else {
+            mvprintw(row, cx + (cw - (int)strlen(welcome_items[i])) / 2, "%s", welcome_items[i]);
+        }
+    }
+
+    attron(A_DIM);
+    mvprintw(cy + ch - 2, cx + (cw - 24) / 2, "\x18\x19 navigate  Enter select");
+    attroff(A_DIM);
+}
+
 static void editor_draw_menu(Editor *e) {
     int mw = 28;
     int mh = MENU_COUNT + 4;
@@ -397,9 +450,39 @@ static void editor_draw_menu(Editor *e) {
     }
 }
 
+static void editor_draw_status(Editor *e, int row, int first_col) {
+    attron(COLOR_PAIR(COL_STATUS));
+    move(row, first_col);
+    const char *mode = e->hex_mode ? "HEX" : "ASC";
+    size_t pct = e->size > 0 ? (e->cursor * 100) / e->size : 0;
+    printw("%s | %08zX/%08zX (%zu%%)  ", mode, e->cursor, e->size, pct);
+
+    if (e->status_msg[0] && difftime(time(NULL), e->status_time) < 3) {
+        int msg_x = e->screen_cols - (int)strlen(e->status_msg) - 4;
+        if (msg_x > getcurx(stdscr)) {
+            move(row, msg_x);
+            printw(" %s ", e->status_msg);
+        }
+    }
+
+    move(row, getcurx(stdscr) < e->screen_cols - 1 ? getcurx(stdscr) : e->screen_cols - 2);
+    while (getcurx(stdscr) < e->screen_cols - 1)
+        addch('-');
+    attroff(COLOR_PAIR(COL_STATUS));
+}
+
 void editor_refresh_screen(Editor *e) {
-    editor_scroll(e);
     getmaxyx(stdscr, e->screen_rows, e->screen_cols);
+
+    if (!e->editor_active) {
+        editor_draw_welcome(e);
+        if (e->menu_open)
+            editor_draw_menu(e);
+        refresh();
+        return;
+    }
+
+    editor_scroll(e);
 
     int content_rows = e->screen_rows - 3;
     if (content_rows <= 0) content_rows = 1;
@@ -415,10 +498,7 @@ void editor_refresh_screen(Editor *e) {
         move(0, 0);
         addch('+');
         printw("-- THORHEX ");
-        if (e->filename)
-            printw("%s (%zu bytes%c) ", e->filename, e->size, e->modified ? '*' : ' ');
-        else
-            printw("[No File] ");
+        printw("%s (%zu bytes%c) ", e->filename, e->size, e->modified ? '*' : ' ');
         while (getcurx(stdscr) < e->screen_cols - 1)
             addch('-');
         addch('+');
@@ -434,25 +514,9 @@ void editor_refresh_screen(Editor *e) {
         move(status_row, 0);
         addch('+');
         printw("-- ");
-
-        const char *mode = e->hex_mode ? "HEX" : "ASC";
-        size_t pct = e->size > 0 ? (e->cursor * 100) / e->size : 0;
-        printw("%s | %08zX/%08zX (%zu%%)  ", mode, e->cursor, e->size, pct);
-
-        // Right-aligned status message
-        if (e->status_msg[0] && difftime(time(NULL), e->status_time) < 3) {
-            int msg_x = e->screen_cols - (int)strlen(e->status_msg) - 4;
-            if (msg_x > getcurx(stdscr)) {
-                move(status_row, msg_x);
-                printw(" %s ", e->status_msg);
-            }
-        }
-
-        move(status_row, getcurx(stdscr) < e->screen_cols - 1 ? getcurx(stdscr) : e->screen_cols - 2);
-        while (getcurx(stdscr) < e->screen_cols - 1)
-            addch('-');
-        addch('+');
         attroff(COLOR_PAIR(COL_STATUS));
+        editor_draw_status(e, status_row, getcurx(stdscr));
+        mvaddch(status_row, e->screen_cols - 1, '+');
     } else {
         int old_r = (int)((e->prev_cursor - e->offset) / BYTES_PER_ROW);
         int new_r = (int)((e->cursor - e->offset) / BYTES_PER_ROW);
@@ -462,19 +526,8 @@ void editor_refresh_screen(Editor *e) {
         if (new_r >= 0 && new_r < content_rows)
             editor_draw_row(e, new_r);
 
-        // Update status bar (position info changed)
-        int status_row = content_rows + 1;
-        const char *mode = e->hex_mode ? "HEX" : "ASC";
-        size_t pct = e->size > 0 ? (e->cursor * 100) / e->size : 0;
-        attron(COLOR_PAIR(COL_STATUS));
-        move(status_row, 4);
-        printw("%s | %08zX/%08zX (%zu%%)  ", mode, e->cursor, e->size, pct);
-        // Clear to right border (before the '+')
-        int fill_start = getcurx(stdscr);
-        move(status_row, fill_start);
-        while (getcurx(stdscr) < e->screen_cols - 1)
-            addch('-');
-        attroff(COLOR_PAIR(COL_STATUS));
+        // Update status bar
+        editor_draw_status(e, content_rows + 1, 4);
     }
 
     // Position cursor
@@ -489,7 +542,7 @@ void editor_refresh_screen(Editor *e) {
     } else {
         sc = ASCII_START + (int)cc;
     }
-    sc += 2; // left border '|' + space after it
+    sc += 2;
     if (sr > content_rows) sr = content_rows;
     if (sc >= e->screen_cols - 1) sc = e->screen_cols - 2;
 
@@ -622,6 +675,52 @@ void editor_process_key(Editor *e, int key) {
             case '\x1b':
                 e->menu_open = false;
                 e->prev_offset = (size_t)-1;
+                break;
+        }
+        return;
+    }
+
+    if (!e->editor_active) {
+        switch (key) {
+            case ARROW_UP:
+                if (e->welcome_selection > 0)
+                    e->welcome_selection--;
+                break;
+            case ARROW_DOWN:
+                if (e->welcome_selection < WELCOME_COUNT - 1)
+                    e->welcome_selection++;
+                break;
+            case CTRL_KEY('q'):
+            case 'q':
+                e->running = false;
+                break;
+            case '\n':
+            case '\r':
+            case KEY_ENTER:
+                switch (e->welcome_selection) {
+                    case WELCOME_OPEN: {
+                        char path[1024] = {0};
+                        if (editor_prompt(e, "Open: ", path, sizeof(path)))
+                            if (!editor_open(e, path))
+                                editor_set_status(e, "Cannot open %s", path);
+                        break;
+                    }
+                    case WELCOME_NEW:
+                        editor_grow_data(e, 1);
+                        e->size = 0;
+                        e->cursor = 0;
+                        e->offset = 0;
+                        e->prev_offset = (size_t)-1;
+                        e->editor_active = true;
+                        break;
+                    case WELCOME_QUIT:
+                        e->running = false;
+                        break;
+                }
+                break;
+            case '\x1b':
+                e->menu_open = true;
+                e->menu_selection = 0;
                 break;
         }
         return;

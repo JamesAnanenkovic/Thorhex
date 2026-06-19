@@ -3,17 +3,11 @@
 #include <stdlib.h>
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: thorhex <file>\n");
-        return 1;
-    }
-
     Editor editor;
     editor_init(&editor);
-    if (!editor_open(&editor, argv[1])) {
-        fprintf(stderr, "thorhex: cannot open %s\n", argv[1]);
-        return 1;
-    }
+    if (argc >= 2)
+        editor_open(&editor, argv[1]);
+
     enable_raw_mode();
 
     while (editor.running) {

@@ -43,6 +43,8 @@ typedef struct {
     size_t prev_offset;
     bool menu_open;
     int menu_selection;
+    int welcome_selection;
+    bool editor_active;
 } Editor;
 
 void editor_init(Editor *e);
