@@ -9,6 +9,11 @@
 #define THORHEX_VERSION "0.1.0"
 #define BYTES_PER_ROW 16
 
+typedef struct {
+    char *name;
+    bool is_dir;
+} FmEntry;
+
 enum editor_key {
     BACKSPACE = 127,
     ARROW_LEFT = 1000,
@@ -48,6 +53,14 @@ typedef struct {
     bool settings_open;
     int settings_selection;
     bool default_hex_mode;
+    int theme;
+    FmEntry *fm_entries;
+    int fm_count;
+    int fm_cap;
+    int fm_selection;
+    int fm_scroll;
+    bool fm_open;
+    char fm_path[1024];
 } Editor;
 
 void editor_init(Editor *e);
@@ -59,7 +72,7 @@ void editor_move_cursor(Editor *e, int key);
 void editor_process_key(Editor *e, int key);
 int editor_read_key(void);
 void editor_refresh_screen(Editor *e);
-void enable_raw_mode(void);
+void enable_raw_mode(Editor *e);
 void disable_raw_mode(void);
 void die(const char *s);
 bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize);

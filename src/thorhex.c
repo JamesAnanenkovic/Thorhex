@@ -2,29 +2,52 @@
 #include "thorhex.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define HEX_START 10
 #define ASCII_START 60
 
-enum { MENU_NONE = -1, MENU_OPEN, MENU_SAVE, MENU_SAVE_AS, MENU_QUIT, MENU_CLOSE, MENU_COUNT };
-enum { WELCOME_OPEN, WELCOME_NEW, WELCOME_SETTINGS, WELCOME_QUIT, WELCOME_COUNT };
+enum { MENU_NONE = -1, MENU_OPEN, MENU_BROWSE, MENU_SAVE, MENU_SAVE_AS, MENU_QUIT, MENU_CLOSE, MENU_COUNT };
+enum { WELCOME_OPEN, WELCOME_BROWSE, WELCOME_NEW, WELCOME_SETTINGS, WELCOME_QUIT, WELCOME_COUNT };
 static const char *welcome_items[] = {
-    "Open File", "Create New File", "Settings", "Quit"
+    "Open File", "Browse Files", "Create New File", "Settings", "Quit"
 };
-enum { SETTINGS_HEX_MODE, SETTINGS_BACK, SETTINGS_COUNT };
+enum { SETTINGS_HEX_MODE, SETTINGS_THEME, SETTINGS_BACK, SETTINGS_COUNT };
 static const char *menu_items[] = {
-    "Open File", "Save", "Save As", "Quit", "Close Menu"
+    "Open File", "Browse", "Save", "Save As", "Quit", "Close Menu"
+};
+
+#define THEME_COUNT 6
+static const char *theme_names[] = {
+    "Blue", "Green", "Red", "Purple", "Cyan", "Yellow"
+};
+static const int theme_colors[THEME_COUNT][6] = {
+    {COLOR_WHITE, COLOR_BLUE,   COLOR_BLACK, COLOR_WHITE, COLOR_WHITE, COLOR_BLUE},
+    {COLOR_WHITE, COLOR_GREEN,  COLOR_BLACK, COLOR_WHITE, COLOR_WHITE, COLOR_GREEN},
+    {COLOR_WHITE, COLOR_RED,    COLOR_BLACK, COLOR_WHITE, COLOR_WHITE, COLOR_RED},
+    {COLOR_WHITE, COLOR_MAGENTA,COLOR_BLACK, COLOR_WHITE, COLOR_WHITE, COLOR_MAGENTA},
+    {COLOR_WHITE, COLOR_CYAN,   COLOR_BLACK, COLOR_WHITE, COLOR_WHITE, COLOR_CYAN},
+    {COLOR_BLACK, COLOR_YELLOW, COLOR_BLACK, COLOR_WHITE, COLOR_BLACK, COLOR_YELLOW},
 };
 #define COL_HEADER 1
 #define COL_CURSOR 2
 #define COL_STATUS 3
+
+void editor_apply_theme(Editor *e, int theme) {
+    if (theme < 0 || theme >= THEME_COUNT) theme = 0;
+    e->theme = theme;
+    init_pair(COL_HEADER, theme_colors[theme][0], theme_colors[theme][1]);
+    init_pair(COL_CURSOR, theme_colors[theme][2], theme_colors[theme][3]);
+    init_pair(COL_STATUS, theme_colors[theme][4], theme_colors[theme][5]);
+}
 
 void die(const char *s) {
     endwin();
@@ -36,7 +59,7 @@ void disable_raw_mode(void) {
     endwin();
 }
 
-void enable_raw_mode(void) {
+void enable_raw_mode(Editor *e) {
     initscr();
     raw();
     noecho();
@@ -45,9 +68,7 @@ void enable_raw_mode(void) {
     if (has_colors()) {
         start_color();
         use_default_colors();
-        init_pair(COL_HEADER, COLOR_WHITE, COLOR_BLUE);
-        init_pair(COL_CURSOR, COLOR_BLACK, COLOR_WHITE);
-        init_pair(COL_STATUS, COLOR_WHITE, COLOR_BLUE);
+        editor_apply_theme(e, e->theme);
     }
     atexit(disable_raw_mode);
 }
@@ -95,6 +116,14 @@ void editor_init(Editor *e) {
     e->settings_open = false;
     e->settings_selection = 0;
     e->default_hex_mode = true;
+    e->theme = 0;
+    e->fm_entries = NULL;
+    e->fm_count = 0;
+    e->fm_cap = 0;
+    e->fm_selection = 0;
+    e->fm_scroll = 0;
+    e->fm_open = false;
+    e->fm_path[0] = '\0';
 }
 
 bool editor_open(Editor *e, const char *filename) {
@@ -202,6 +231,9 @@ void editor_save_as(Editor *e, const char *filename) {
 void editor_free(Editor *e) {
     free(e->data);
     free(e->filename);
+    for (int i = 0; i < e->fm_count; i++)
+        free(e->fm_entries[i].name);
+    free(e->fm_entries);
 }
 
 void editor_move_cursor(Editor *e, int key) {
@@ -364,6 +396,158 @@ bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize) {
     return buf[0] != '\0';
 }
 
+static int fm_entry_cmp(const void *a, const void *b) {
+    const FmEntry *ea = (const FmEntry *)a;
+    const FmEntry *eb = (const FmEntry *)b;
+    if (ea->is_dir && !eb->is_dir) return -1;
+    if (!ea->is_dir && eb->is_dir) return 1;
+    return strcmp(ea->name, eb->name);
+}
+
+static void editor_scan_directory(Editor *e) {
+    for (int i = 0; i < e->fm_count; i++)
+        free(e->fm_entries[i].name);
+    free(e->fm_entries);
+    e->fm_entries = NULL;
+    e->fm_count = 0;
+    e->fm_cap = 0;
+
+    if (e->fm_path[0] == '\0') {
+        if (!getcwd(e->fm_path, sizeof(e->fm_path)))
+            return;
+    }
+
+    // Add ".." entry unless at root
+    if (strcmp(e->fm_path, "/") != 0) {
+        if (e->fm_count >= e->fm_cap) {
+            e->fm_cap = e->fm_cap ? e->fm_cap * 2 : 128;
+            e->fm_entries = realloc(e->fm_entries, e->fm_cap * sizeof(FmEntry));
+        }
+        e->fm_entries[e->fm_count].name = strdup("..");
+        e->fm_entries[e->fm_count].is_dir = true;
+        e->fm_count++;
+    }
+
+    DIR *dir = opendir(e->fm_path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        if (strcmp(entry->d_name, "..") == 0) continue;
+
+        if (e->fm_count >= e->fm_cap) {
+            e->fm_cap = e->fm_cap ? e->fm_cap * 2 : 128;
+            e->fm_entries = realloc(e->fm_entries, e->fm_cap * sizeof(FmEntry));
+        }
+        e->fm_entries[e->fm_count].name = strdup(entry->d_name);
+        struct stat st;
+        bool is_dir = false;
+        char full[1024];
+        snprintf(full, sizeof(full), "%s/%s", e->fm_path, entry->d_name);
+        if (stat(full, &st) == 0 && S_ISDIR(st.st_mode))
+            is_dir = true;
+        e->fm_entries[e->fm_count].is_dir = is_dir;
+        e->fm_count++;
+    }
+    closedir(dir);
+
+    // Sort entries after ".."
+    if (e->fm_count > 1)
+        qsort(e->fm_entries + 1, e->fm_count - 1, sizeof(FmEntry), fm_entry_cmp);
+}
+
+static void editor_fm_go_up(Editor *e) {
+    char *slash = strrchr(e->fm_path, '/');
+    if (!slash) return;
+    if (slash == e->fm_path)
+        e->fm_path[1] = '\0';
+    else
+        *slash = '\0';
+    editor_scan_directory(e);
+    e->fm_selection = 0;
+    e->fm_scroll = 0;
+}
+
+static void editor_fm_enter_dir(Editor *e, const char *dirname) {
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf), "%s/%s", e->fm_path, dirname);
+    if (n < (int)sizeof(buf))
+        memcpy(e->fm_path, buf, (size_t)n + 1);
+    editor_scan_directory(e);
+    e->fm_selection = 0;
+    e->fm_scroll = 0;
+}
+
+static void editor_fm_open_file(Editor *e, const char *filename) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", e->fm_path, filename);
+    editor_free(e);
+    editor_init(e);
+    if (editor_open(e, path))
+        e->fm_open = false;
+    else
+        editor_set_status(e, "Cannot open %s", path);
+}
+
+static void editor_draw_filemanager(Editor *e) {
+    clear();
+    int mx = e->screen_cols / 2;
+
+    attron(A_BOLD);
+    const char *title = "FILE BROWSER";
+    mvprintw(0, mx - (int)strlen(title) / 2, "%s", title);
+    attroff(A_BOLD);
+
+    attron(A_DIM);
+    mvprintw(1, 2, "%s", e->fm_path);
+    attroff(A_DIM);
+
+    mvhline(2, 0, '-', e->screen_cols);
+
+    int rows = e->screen_rows - 5;
+    if (rows <= 0) rows = 1;
+
+    // Ensure selection is visible
+    if (e->fm_selection < e->fm_scroll)
+        e->fm_scroll = e->fm_selection;
+    if (e->fm_selection >= e->fm_scroll + rows)
+        e->fm_scroll = e->fm_selection - rows + 1;
+
+    for (int r = 0; r < rows && r + e->fm_scroll < e->fm_count; r++) {
+        int idx = r + e->fm_scroll;
+        FmEntry *fe = &e->fm_entries[idx];
+        int y = 3 + r;
+
+        if (idx == e->fm_selection)
+            attron(COLOR_PAIR(COL_CURSOR));
+
+        move(y, 2);
+        if (fe->is_dir) {
+            attron(A_BOLD);
+            printw("%-30s  [DIR]", fe->name);
+            attroff(A_BOLD);
+        } else {
+            printw("%s", fe->name);
+        }
+
+        if (idx == e->fm_selection)
+            attroff(COLOR_PAIR(COL_CURSOR));
+
+        // Clear rest of line
+        int cx = getcurx(stdscr);
+        while (cx < e->screen_cols - 1) {
+            addch(' ');
+            cx++;
+        }
+    }
+
+    attron(A_DIM);
+    mvprintw(e->screen_rows - 2, 2,
+             "\x18\x19 navigate  Enter open  Backspace up  ESC back  q quit");
+    attroff(A_DIM);
+}
+
 static void editor_draw_welcome(Editor *e) {
     clear();
     int mx = e->screen_cols / 2;
@@ -410,7 +594,7 @@ static void editor_draw_welcome(Editor *e) {
 
     attron(A_DIM);
     mvprintw(12 + WELCOME_COUNT + 1, 2,
-             "\x18\x19/\x1b\x1a navigate  Enter select  1-4 jump   ESC menu  q quit");
+             "\x18\x19/\x1b\x1a navigate  Enter select  1-5 jump   ESC menu  q quit");
     attroff(A_DIM);
 }
 
@@ -431,6 +615,8 @@ static void editor_draw_settings(Editor *e) {
         if (i == SETTINGS_HEX_MODE) {
             snprintf(buf, sizeof(buf), "Default Hex Mode: %s",
                      e->default_hex_mode ? "ON " : "OFF");
+        } else if (i == SETTINGS_THEME) {
+            snprintf(buf, sizeof(buf), "Theme: %s", theme_names[e->theme]);
         } else {
             snprintf(buf, sizeof(buf), "%s", "Back to Main Menu");
         }
@@ -519,7 +705,9 @@ void editor_refresh_screen(Editor *e) {
     getmaxyx(stdscr, e->screen_rows, e->screen_cols);
 
     if (!e->editor_active) {
-        if (e->settings_open) {
+        if (e->fm_open) {
+            editor_draw_filemanager(e);
+        } else if (e->settings_open) {
             editor_draw_settings(e);
         } else {
             editor_draw_welcome(e);
@@ -662,6 +850,13 @@ static void editor_menu_action(Editor *e, int action) {
             }
             break;
         }
+        case MENU_BROWSE:
+            e->fm_open = true;
+            e->fm_path[0] = '\0';
+            editor_scan_directory(e);
+            e->fm_selection = 0;
+            e->fm_scroll = 0;
+            break;
         case MENU_SAVE:
             if (editor_save(e))
                 editor_set_status(e, "Saved (%zu bytes)", e->size);
@@ -728,6 +923,47 @@ void editor_process_key(Editor *e, int key) {
         return;
     }
 
+    if (e->fm_open) {
+        switch (key) {
+            case ARROW_UP:
+                if (e->fm_selection > 0)
+                    e->fm_selection--;
+                break;
+            case ARROW_DOWN:
+                if (e->fm_selection < e->fm_count - 1)
+                    e->fm_selection++;
+                break;
+            case '\n':
+            case '\r':
+            case KEY_ENTER:
+                if (e->fm_selection >= 0 && e->fm_selection < e->fm_count) {
+                    FmEntry *fe = &e->fm_entries[e->fm_selection];
+                    if (strcmp(fe->name, "..") == 0) {
+                        editor_fm_go_up(e);
+                    } else if (fe->is_dir) {
+                        editor_fm_enter_dir(e, fe->name);
+                    } else {
+                        editor_fm_open_file(e, fe->name);
+                    }
+                }
+                break;
+            case '\x7f':
+            case KEY_BACKSPACE:
+            case '\b':
+                editor_fm_go_up(e);
+                break;
+            case 'q':
+            case CTRL_KEY('q'):
+                e->running = false;
+                break;
+            case '\x1b':
+                e->fm_open = false;
+                e->prev_offset = (size_t)-1;
+                break;
+        }
+        return;
+    }
+
     if (!e->editor_active) {
         if (e->settings_open) {
             switch (key) {
@@ -745,6 +981,9 @@ void editor_process_key(Editor *e, int key) {
                     if (e->settings_selection == SETTINGS_HEX_MODE) {
                         e->default_hex_mode = !e->default_hex_mode;
                         e->hex_mode = e->default_hex_mode;
+                    } else if (e->settings_selection == SETTINGS_THEME) {
+                        int t = (e->theme + 1) % THEME_COUNT;
+                        editor_apply_theme(e, t);
                     } else if (e->settings_selection == SETTINGS_BACK) {
                         e->settings_open = false;
                     }
@@ -773,6 +1012,7 @@ void editor_process_key(Editor *e, int key) {
             case '2': e->welcome_selection = 1; goto welcome_enter;
             case '3': e->welcome_selection = 2; goto welcome_enter;
             case '4': e->welcome_selection = 3; goto welcome_enter;
+            case '5': e->welcome_selection = 4; goto welcome_enter;
             case CTRL_KEY('q'):
             case 'q':
                 e->running = false;
@@ -789,6 +1029,13 @@ welcome_enter:
                                 editor_set_status(e, "Cannot open %s", path);
                         break;
                     }
+                    case WELCOME_BROWSE:
+                        e->fm_open = true;
+                        e->fm_path[0] = '\0';
+                        editor_scan_directory(e);
+                        e->fm_selection = 0;
+                        e->fm_scroll = 0;
+                        break;
                     case WELCOME_NEW:
                         editor_grow_data(e, 1);
                         e->size = 0;
