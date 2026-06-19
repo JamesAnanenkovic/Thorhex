@@ -14,10 +14,11 @@
 #define ASCII_START 60
 
 enum { MENU_NONE = -1, MENU_OPEN, MENU_SAVE, MENU_SAVE_AS, MENU_QUIT, MENU_CLOSE, MENU_COUNT };
-enum { WELCOME_OPEN, WELCOME_NEW, WELCOME_QUIT, WELCOME_COUNT };
+enum { WELCOME_OPEN, WELCOME_NEW, WELCOME_SETTINGS, WELCOME_QUIT, WELCOME_COUNT };
 static const char *welcome_items[] = {
-    "Open File", "Create New File", "Quit"
+    "Open File", "Create New File", "Settings", "Quit"
 };
+enum { SETTINGS_HEX_MODE, SETTINGS_BACK, SETTINGS_COUNT };
 static const char *menu_items[] = {
     "Open File", "Save", "Save As", "Quit", "Close Menu"
 };
@@ -76,7 +77,7 @@ void editor_init(Editor *e) {
     e->modified = false;
     e->cursor = 0;
     e->offset = 0;
-    e->hex_mode = true;
+    e->hex_mode = e->default_hex_mode;
     e->pending = false;
     e->nibble = 0;
     e->status_msg[0] = '\0';
@@ -91,6 +92,9 @@ void editor_init(Editor *e) {
     e->menu_selection = 0;
     e->welcome_selection = 0;
     e->editor_active = false;
+    e->settings_open = false;
+    e->settings_selection = 0;
+    e->default_hex_mode = true;
 }
 
 bool editor_open(Editor *e, const char *filename) {
@@ -121,6 +125,7 @@ bool editor_open(Editor *e, const char *filename) {
     e->cursor = 0;
     e->offset = 0;
     e->editor_active = true;
+    e->hex_mode = e->default_hex_mode;
     e->pending = false;
     e->prev_cursor = 0;
     e->prev_offset = (size_t)-1;
@@ -361,47 +366,86 @@ bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize) {
 
 static void editor_draw_welcome(Editor *e) {
     clear();
-    int cw = 34, ch = 12;
-    int cx = (e->screen_cols - cw) / 2;
-    int cy = (e->screen_rows - ch) / 2;
-    if (cx < 0) cx = 0;
-    if (cy < 0) cy = 0;
+    int mx = e->screen_cols / 2;
 
-    for (int r = 0; r < ch; r++)
-        for (int c = 0; c < cw; c++)
-            mvaddch(cy + r, cx + c, ' ');
-
-    mvaddch(cy, cx, '+');
-    mvaddch(cy, cx + cw - 1, '+');
-    mvaddch(cy + ch - 1, cx, '+');
-    mvaddch(cy + ch - 1, cx + cw - 1, '+');
-    for (int c = 1; c < cw - 1; c++) {
-        mvaddch(cy, cx + c, '-');
-        mvaddch(cy + ch - 1, cx + c, '-');
-    }
-    for (int r = 1; r < ch - 1; r++) {
-        mvaddch(cy + r, cx, '|');
-        mvaddch(cy + r, cx + cw - 1, '|');
-    }
+    const char *banner[] = {
+        "TTTTT H   H OOOOO RRRRR H   H EEEEE X   X",
+        "  T   H   H O   O R   R H   H E      X X ",
+        "  T   HHHHH O   O RRRRR HHHHH EEEEE   X  ",
+        "  T   H   H O   O R   R H   H E      X X ",
+        "  T   H   H OOOOO R   R H   H EEEEE X   X",
+    };
+    int banner_lines = 5;
 
     attron(A_BOLD);
-    mvprintw(cy + 1, cx + (cw - 10) / 2, " THORHEX ");
+    for (int i = 0; i < banner_lines; i++) {
+        int bw = (int)strlen(banner[i]);
+        mvprintw(1 + i, mx - bw / 2, "%s", banner[i]);
+    }
     attroff(A_BOLD);
-    mvprintw(cy + 2, cx + (cw - 9) / 2, "v%s  Hex Editor", THORHEX_VERSION);
+
+    attron(A_BOLD);
+    const char *title = "THORHEX Hex Editor";
+    mvprintw(7, mx - (int)strlen(title) / 2, "%s", title);
+    attroff(A_BOLD);
+
+    char ver[32];
+    snprintf(ver, sizeof(ver), "v%s", THORHEX_VERSION);
+    mvprintw(8, mx - (int)strlen(ver) / 2, "%s", ver);
+
+    mvhline(10, 2, '-', e->screen_cols - 4);
 
     for (int i = 0; i < WELCOME_COUNT; i++) {
-        int row = cy + 5 + i * 2;
+        int row = 12 + i;
+        char label[32];
+        snprintf(label, sizeof(label), "[%d] %s", i + 1, welcome_items[i]);
         if (i == e->welcome_selection) {
             attron(COLOR_PAIR(COL_CURSOR));
-            mvprintw(row, cx + (cw - (int)strlen(welcome_items[i])) / 2, "%s", welcome_items[i]);
+            mvprintw(row, mx - 8, "%s", label);
             attroff(COLOR_PAIR(COL_CURSOR));
         } else {
-            mvprintw(row, cx + (cw - (int)strlen(welcome_items[i])) / 2, "%s", welcome_items[i]);
+            mvprintw(row, mx - 8, "%s", label);
         }
     }
 
     attron(A_DIM);
-    mvprintw(cy + ch - 2, cx + (cw - 24) / 2, "\x18\x19 navigate  Enter select");
+    mvprintw(12 + WELCOME_COUNT + 1, 2,
+             "\x18\x19/\x1b\x1a navigate  Enter select  1-4 jump   ESC menu  q quit");
+    attroff(A_DIM);
+}
+
+static void editor_draw_settings(Editor *e) {
+    clear();
+    int mx = e->screen_cols / 2;
+
+    attron(A_BOLD);
+    const char *title = "SETTINGS";
+    mvprintw(2, mx - (int)strlen(title) / 2, "%s", title);
+    attroff(A_BOLD);
+
+    mvhline(4, 2, '-', e->screen_cols - 4);
+
+    for (int i = 0; i < SETTINGS_COUNT; i++) {
+        int row = 6 + i * 2;
+        char buf[64];
+        if (i == SETTINGS_HEX_MODE) {
+            snprintf(buf, sizeof(buf), "Default Hex Mode: %s",
+                     e->default_hex_mode ? "ON " : "OFF");
+        } else {
+            snprintf(buf, sizeof(buf), "%s", "Back to Main Menu");
+        }
+        if (i == e->settings_selection) {
+            attron(COLOR_PAIR(COL_CURSOR));
+            mvprintw(row, mx - 14, "%s", buf);
+            attroff(COLOR_PAIR(COL_CURSOR));
+        } else {
+            mvprintw(row, mx - 14, "%s", buf);
+        }
+    }
+
+    attron(A_DIM);
+    mvprintw(6 + SETTINGS_COUNT * 2 + 1, 2,
+             "\x18\x19 navigate  Enter toggle/select  ESC back");
     attroff(A_DIM);
 }
 
@@ -475,7 +519,11 @@ void editor_refresh_screen(Editor *e) {
     getmaxyx(stdscr, e->screen_rows, e->screen_cols);
 
     if (!e->editor_active) {
-        editor_draw_welcome(e);
+        if (e->settings_open) {
+            editor_draw_settings(e);
+        } else {
+            editor_draw_welcome(e);
+        }
         if (e->menu_open)
             editor_draw_menu(e);
         refresh();
@@ -681,6 +729,37 @@ void editor_process_key(Editor *e, int key) {
     }
 
     if (!e->editor_active) {
+        if (e->settings_open) {
+            switch (key) {
+                case ARROW_UP:
+                    if (e->settings_selection > 0)
+                        e->settings_selection--;
+                    break;
+                case ARROW_DOWN:
+                    if (e->settings_selection < SETTINGS_COUNT - 1)
+                        e->settings_selection++;
+                    break;
+                case '\n':
+                case '\r':
+                case KEY_ENTER:
+                    if (e->settings_selection == SETTINGS_HEX_MODE) {
+                        e->default_hex_mode = !e->default_hex_mode;
+                        e->hex_mode = e->default_hex_mode;
+                    } else if (e->settings_selection == SETTINGS_BACK) {
+                        e->settings_open = false;
+                    }
+                    break;
+                case 'q':
+                case CTRL_KEY('q'):
+                    e->running = false;
+                    break;
+                case '\x1b':
+                    e->settings_open = false;
+                    break;
+            }
+            return;
+        }
+
         switch (key) {
             case ARROW_UP:
                 if (e->welcome_selection > 0)
@@ -690,6 +769,10 @@ void editor_process_key(Editor *e, int key) {
                 if (e->welcome_selection < WELCOME_COUNT - 1)
                     e->welcome_selection++;
                 break;
+            case '1': e->welcome_selection = 0; goto welcome_enter;
+            case '2': e->welcome_selection = 1; goto welcome_enter;
+            case '3': e->welcome_selection = 2; goto welcome_enter;
+            case '4': e->welcome_selection = 3; goto welcome_enter;
             case CTRL_KEY('q'):
             case 'q':
                 e->running = false;
@@ -697,6 +780,7 @@ void editor_process_key(Editor *e, int key) {
             case '\n':
             case '\r':
             case KEY_ENTER:
+welcome_enter:
                 switch (e->welcome_selection) {
                     case WELCOME_OPEN: {
                         char path[1024] = {0};
@@ -712,6 +796,11 @@ void editor_process_key(Editor *e, int key) {
                         e->offset = 0;
                         e->prev_offset = (size_t)-1;
                         e->editor_active = true;
+                        e->hex_mode = e->default_hex_mode;
+                        break;
+                    case WELCOME_SETTINGS:
+                        e->settings_open = true;
+                        e->settings_selection = 0;
                         break;
                     case WELCOME_QUIT:
                         e->running = false;

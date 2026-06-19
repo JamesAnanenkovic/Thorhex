@@ -45,6 +45,9 @@ typedef struct {
     int menu_selection;
     int welcome_selection;
     bool editor_active;
+    bool settings_open;
+    int settings_selection;
+    bool default_hex_mode;
 } Editor;
 
 void editor_init(Editor *e);
