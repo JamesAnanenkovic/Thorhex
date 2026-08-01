@@ -544,7 +544,7 @@ static void editor_draw_filemanager(Editor *e) {
 
     attron(A_DIM);
     mvprintw(e->screen_rows - 2, 2,
-             "\x18\x19 navigate  Enter open  Backspace up  ESC back  q quit");
+             "navigate  Enter open  Backspace up  ESC back  q quit");
     attroff(A_DIM);
 }
 
@@ -594,7 +594,7 @@ static void editor_draw_welcome(Editor *e) {
 
     attron(A_DIM);
     mvprintw(12 + WELCOME_COUNT + 1, 2,
-             "\x18\x19/\x1b\x1a navigate  Enter select  1-5 jump   ESC menu  q quit");
+             "navigate  Enter select  1-5 jump   ESC menu  q quit");
     attroff(A_DIM);
 }
 
@@ -631,7 +631,7 @@ static void editor_draw_settings(Editor *e) {
 
     attron(A_DIM);
     mvprintw(6 + SETTINGS_COUNT * 2 + 1, 2,
-             "\x18\x19 navigate  Enter toggle/select  ESC back");
+             "navigate  Enter toggle/select  ESC back");
     attroff(A_DIM);
 }
 
