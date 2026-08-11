@@ -46,6 +46,9 @@ Requires `ncurses` development headers (`libncurses-dev` on Debian, `ncurses` on
 | `0`-`9` `a`-`f`  | Hex nibble input |
 | ASCII chars      | Insert in ASCII  |
 | `Ctrl+S`         | Save             |
+| `Ctrl+F`         | Text search      |
+| `Ctrl+H`         | Hex search       |
+| `Ctrl+G`         | Find next        |
 | `Ctrl+Q` / `q`   | Quit             |
 | `ESC`            | Open menu        |
 | `PgUp` / `PgDn`  | Scroll pages     |

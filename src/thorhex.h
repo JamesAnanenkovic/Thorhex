@@ -61,6 +61,12 @@ typedef struct {
     int fm_scroll;
     bool fm_open;
     char fm_path[1024];
+    char search_str[256];
+    unsigned char search_pat[128];
+    size_t search_pat_len;
+    size_t search_last;
+    bool search_active;
+    bool search_hex;
 } Editor;
 
 void editor_init(Editor *e);
@@ -76,5 +82,7 @@ void enable_raw_mode(Editor *e);
 void disable_raw_mode(void);
 void die(const char *s);
 bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize);
+void editor_search(Editor *e, bool hex);
+void editor_search_next(Editor *e);
 
 #endif

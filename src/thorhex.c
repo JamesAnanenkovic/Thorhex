@@ -124,6 +124,11 @@ void editor_init(Editor *e) {
     e->fm_scroll = 0;
     e->fm_open = false;
     e->fm_path[0] = '\0';
+    e->search_str[0] = '\0';
+    e->search_pat_len = 0;
+    e->search_last = 0;
+    e->search_active = false;
+    e->search_hex = false;
 }
 
 bool editor_open(Editor *e, const char *filename) {
@@ -158,6 +163,11 @@ bool editor_open(Editor *e, const char *filename) {
     e->pending = false;
     e->prev_cursor = 0;
     e->prev_offset = (size_t)-1;
+    e->search_str[0] = '\0';
+    e->search_pat_len = 0;
+    e->search_last = 0;
+    e->search_active = false;
+    e->search_hex = false;
     return true;
 }
 
@@ -302,6 +312,12 @@ static void editor_scroll(Editor *e) {
     e->offset = offset_row * BYTES_PER_ROW;
 }
 
+static bool editor_is_match(Editor *e, size_t pos) {
+    return e->search_active && e->search_pat_len > 0 &&
+           pos >= e->search_last &&
+           pos < e->search_last + e->search_pat_len;
+}
+
 static void editor_draw_row(Editor *e, int r) {
     size_t ro = e->offset + (size_t)r * BYTES_PER_ROW;
     int y = 1 + r;
@@ -327,6 +343,10 @@ static void editor_draw_row(Editor *e, int r) {
                     printw("%02X", byte);
                     attroff(COLOR_PAIR(COL_CURSOR));
                 }
+            } else if (editor_is_match(e, ro + i)) {
+                attron(A_REVERSE);
+                printw("%02X", byte);
+                attroff(A_REVERSE);
             } else {
                 printw("%02X", byte);
             }
@@ -349,6 +369,10 @@ static void editor_draw_row(Editor *e, int r) {
                 attron(COLOR_PAIR(COL_CURSOR));
                 addch(c);
                 attroff(COLOR_PAIR(COL_CURSOR));
+            } else if (editor_is_match(e, ro + i)) {
+                attron(A_REVERSE);
+                addch(c);
+                attroff(A_REVERSE);
             } else {
                 addch(c);
             }
@@ -394,6 +418,102 @@ bool editor_prompt(Editor *e, const char *prompt, char *buf, int bufsize) {
     }
     e->prev_offset = (size_t)-1;
     return buf[0] != '\0';
+}
+
+static bool editor_parse_hex_query(const char *s, unsigned char *out, size_t *outlen) {
+    unsigned char nibbles[256];
+    size_t nn = 0;
+    for (const char *p = s; *p && nn < sizeof(nibbles); p++) {
+        int d;
+        if (*p >= '0' && *p <= '9') d = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
+        else continue;
+        nibbles[nn++] = (unsigned char)d;
+    }
+    if (nn == 0) return false;
+    size_t n = 0;
+    for (size_t i = 0; i < nn && n < 128; i += 2) {
+        if (i + 1 < nn)
+            out[n++] = (unsigned char)((nibbles[i] << 4) | nibbles[i + 1]);
+        else
+            out[n++] = nibbles[i];
+    }
+    *outlen = n;
+    return true;
+}
+
+static bool editor_find_pattern(Editor *e, const unsigned char *pat, size_t plen,
+                                size_t start, size_t *found) {
+    if (plen == 0 || plen > e->size) return false;
+    size_t limit = e->size - plen + 1;
+    for (size_t i = start; i < limit; i++) {
+        if (memcmp(e->data + i, pat, plen) == 0) {
+            *found = i;
+            return true;
+        }
+    }
+    for (size_t i = 0; i < start && i < limit; i++) {
+        if (memcmp(e->data + i, pat, plen) == 0) {
+            *found = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void editor_goto_match(Editor *e, size_t pos, bool hex) {
+    e->cursor = pos;
+    e->search_last = pos;
+    e->prev_offset = (size_t)-1;
+    e->pending = false;
+    editor_set_status(e, "Found at %08zX  (Ctrl+G next)", pos);
+    (void)hex;
+}
+
+void editor_search(Editor *e, bool hex) {
+    char query[256];
+    const char *prompt = hex ? "Hex find: " : "Find: ";
+    if (!editor_prompt(e, prompt, query, sizeof(query)))
+        return;
+
+    if (hex) {
+        if (!editor_parse_hex_query(query, e->search_pat, &e->search_pat_len)) {
+            editor_set_status(e, "No valid hex digits");
+            return;
+        }
+    } else {
+        e->search_pat_len = strlen(query);
+        if (e->search_pat_len > sizeof(e->search_pat))
+            e->search_pat_len = sizeof(e->search_pat);
+        memcpy(e->search_pat, query, e->search_pat_len);
+    }
+
+    e->search_hex = hex;
+    e->search_active = true;
+    snprintf(e->search_str, sizeof(e->search_str), "%s", query);
+
+    size_t found;
+    if (editor_find_pattern(e, e->search_pat, e->search_pat_len, e->cursor, &found)) {
+        editor_goto_match(e, found, hex);
+    } else {
+        e->search_active = false;
+        editor_set_status(e, "%s not found", hex ? "Pattern" : "Text");
+    }
+}
+
+void editor_search_next(Editor *e) {
+    if (!e->search_active || e->search_pat_len == 0) {
+        editor_set_status(e, "No active search (Ctrl+F text / Ctrl+H hex)");
+        return;
+    }
+    size_t found;
+    if (editor_find_pattern(e, e->search_pat, e->search_pat_len,
+                            e->search_last + 1, &found)) {
+        editor_goto_match(e, found, e->search_hex);
+    } else {
+        editor_set_status(e, "No more matches");
+    }
 }
 
 static int fm_entry_cmp(const void *a, const void *b) {
@@ -1082,6 +1202,18 @@ welcome_enter:
                 editor_set_status(e, "Saved (%zu bytes)", e->size);
             else
                 editor_set_status(e, "Save failed!");
+            break;
+
+        case CTRL_KEY('f'):
+            editor_search(e, false);
+            break;
+
+        case CTRL_KEY('h'):
+            editor_search(e, true);
+            break;
+
+        case CTRL_KEY('g'):
+            editor_search_next(e);
             break;
 
         case '\t':
